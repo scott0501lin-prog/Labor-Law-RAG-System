@@ -1,101 +1,97 @@
 import os
+import google.generativeai as genai
 import chromadb
 from chromadb.utils import embedding_functions
-import google.generativeai as genai
 from dotenv import load_dotenv
-from google.api_core.exceptions import ResourceExhausted
 
-# ==========================================
-# 1. 載入環境變數與設定 API 金鑰
-# ==========================================
-# 讀取 .env 檔案，保護你的 API Key 不外流
+# 1. 喚醒隱形斗篷裡的 API 金鑰
 load_dotenv()
-API_KEY = os.getenv("GEMINI_API_KEY")
+api_key = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=api_key)
 
-if not API_KEY:
-    print("⚠️ 錯誤：找不到 API Key，請檢查 .env 檔案是否有正確設定 GEMINI_API_KEY。")
-    exit()
+print("🔗 正在載入雙核心大腦（法規資料庫 + PTT 實戰案例庫）...")
 
-# 設定 Gemini 模型 (使用適合 RAG 的輕量級快速模型)
-genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
-
-# ==========================================
-# 2. 連線至本地向量資料庫 (ChromaDB)
-# ==========================================
-print("🔗 正在載入法規大腦 (向量資料庫)...")
+# 2. 連線到 ChromaDB
+client = chromadb.PersistentClient(path="./law_db")
 embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
     model_name="shibing624/text2vec-base-chinese"
 )
 
-# 讀取先前建置好的 law_db 資料夾
-client = chromadb.PersistentClient(path="./law_db")
-collection = client.get_collection(
-    name="labor_law_collection", 
-    embedding_function=embedding_fn
+# 3. 取得兩個 Collection (確保名稱跟你建立時一模一樣)
+try:
+    law_collection = client.get_collection(name="labor_law_collection", embedding_function=embedding_fn)
+    case_collection = client.get_collection(name="ptt_cases_collection", embedding_function=embedding_fn)
+    print("✅ 雙核心大腦載入成功！\n")
+except Exception as e:
+    print(f"❌ 資料庫載入失敗，請檢查 Collection 名稱是否正確：{e}")
+    exit()
+
+# 設定 Gemini 模型 (使用最新支援 System Instruction 的語法)
+system_prompt = """你是一位專業、充滿同理心的「AI 勞資顧問」。
+當使用者發問時，我會提供你兩份參考資料：【相關法規】與【PTT實戰案例】。
+
+【最高排版原則】：
+你必須將所有資訊「融合為單一一個自然段落」。
+絕對禁止使用任何標題、數字編號（1. 2. 3.）、列點符號（* 或 -）、或是粗體字（**）。請只輸出純文字對話。
+
+【正確示範】（請完全模仿這種單一段落、像前輩聊天的語氣）：
+依照勞基法第 XX 條的規定，其實你是可以爭取加班費的喔！我看過很多 PTT 網友分享類似的經驗，公司通常會想用補休來打發你，但我強烈建議你直接向人資表明拒絕，並保留好打卡紀錄，這才是對你最有利的作法！
+
+【錯誤示範】（絕對、絕對不可以使用以下這種格式）：
+法律怎麼說：勞基法規定...
+真實世界長怎樣：PTT網友說...
+顧問行動建議：你應該...
+
+如果提供的資料中沒有相關資訊，請誠實告知，絕對不可以自己捏造。請記住，只能輸出一段純文字！
+"""
+model = genai.GenerativeModel(
+    model_name="gemini-2.5-flash", # 或 gemini-1.5-flash
+    system_instruction=system_prompt
 )
 
-# ==========================================
-# 3. 核心 RAG 處理函式
-# ==========================================
-def ask_labor_law(query):
-    # 【Retrieval 檢索階段】找出最相關的 5 條法規
-    results = collection.query(query_texts=[query], n_results=5)
+print("=========================================")
+print("🤖 雙核心 AI 勞資顧問已上線！(輸入 'quit' 離開)")
+print("=========================================")
+
+# 4. 開始聊天迴圈
+while True:
+    user_input = input("\n👤 提問：")
     
-    # 將找到的法規拼成一大段文字，作為 AI 的參考資料
-    context = "\n\n".join(results['documents'][0])
+    if user_input.lower() in ['quit', 'exit', 'q']:
+        print("👋 顧問下線，祝你職場順心！")
+        break
+        
+    if not user_input.strip():
+        continue
+        
+    print("⏳ 顧問正在翻閱法條與鄉民經驗...")
     
-    # 【Generation 生成階段】建構 Prompt (提示詞)
-    prompt = f"""
-    你是一位專業的台灣勞資爭議顧問。請嚴格根據以下提供的【參考法規】來回答問題。
-    如果法規中沒有提到，請回答「根據目前的勞基法資料庫，我無法準確回答這個問題」，絕對不可以自己瞎掰。
+    # [檢索階段] 同時查詢兩個資料庫
+    # 抓取 2 條最相關的法規
+    law_results = law_collection.query(query_texts=[user_input], n_results=2)
+    # 抓取 3 篇最相關的 PTT 文章
+    case_results = case_collection.query(query_texts=[user_input], n_results=3)
     
-    【參考法規】：
-    {context}
+    # 將檢索結果整理成純文字
+    law_context = "\n".join(law_results['documents'][0])
+    case_context = "\n".join(case_results['documents'][0])
     
-    【使用者問題】：
-    {query}
+    # [增強階段] 將檢索到的資料與使用者的問題組合成最終 Prompt
+    final_prompt = f"""
+    【相關法規】：
+    {law_context}
     
-    請以專業、親切且條理清晰的白話文方式回答。
+    【PTT實戰案例】：
+    {case_context}
+    
+    使用者問題：{user_input}
     """
     
-    print(f"🤖 AI 顧問：\n")
-    
-    # 🌟 加入防護網：處理 API 呼叫與串流輸出
     try:
-        # stream=True 開啟打字機效果
-        response = model.generate_content(prompt, stream=True)
-        
-        full_answer = ""
-        for chunk in response:
-            print(chunk.text, end="", flush=True)
-            full_answer += chunk.text
-            
-        print("\n") # 換行收尾
-        return full_answer
-        
-    except ResourceExhausted:
-        error_msg = "\n⏳ 系統提示：目前詢問人數過多（已達免費 API 呼叫上限），請稍等 1 分鐘後再重新發問喔！"
-        print(error_msg)
-        return error_msg
-        
+        # [生成階段] 呼叫 Gemini 給出回答
+        response = model.generate_content(final_prompt)
+        print("\n🤖 AI 顧問：\n")
+        print(response.text)
+        print("\n" + "-"*40)
     except Exception as e:
-        error_msg = f"\n⚠️ 系統發生異常：{e}"
-        print(error_msg)
-        return "系統發生未預期錯誤，請稍後再試。"
-
-# ==========================================
-# 4. 系統執行與測試
-# ==========================================
-if __name__ == "__main__":
-    print("✅ 系統準備就緒！\n")
-    
-    user_query = "過年期間被老闆要求加班，薪水補償怎麼算？"
-    
-    print(f"👤 提問：{user_query}")
-    print("-" * 40)
-    
-    # 呼叫函式
-    ask_labor_law(user_query)
-    
-    print("-" * 40)
+        print(f"\n⚠️ 系統發生異常：{e}")
